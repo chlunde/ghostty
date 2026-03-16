@@ -18,6 +18,7 @@ const fastmem = @import("../fastmem.zig");
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const shell_integration = @import("shell_integration.zig");
+const subprocess_pool = @import("subprocess_pool.zig");
 const terminal = @import("../terminal/main.zig");
 const termio = @import("../termio.zig");
 const Command = @import("../Command.zig");
@@ -87,6 +88,9 @@ pub fn threadEnter(
     io: *termio.Termio,
     td: *termio.Termio.ThreadData,
 ) !void {
+    const thread_enter_start = std.time.Instant.now() catch null;
+    log.info("threadEnter: starting subprocess", .{});
+
     // Start our subprocess
     const pty_fds = self.subprocess.start(alloc) catch |err| {
         // If we specifically got this error then we are in the forked
@@ -114,6 +118,15 @@ pub fn threadEnter(
         .flatpak => null,
     } else return error.ProcessNotStarted;
     errdefer if (process) |*p| p.deinit();
+
+    // Record subprocess start time for time-to-first-prompt metric.
+    io.terminal_stream.handler.subprocess_started_at = std.time.Instant.now() catch null;
+
+    if (thread_enter_start) |te_start| {
+        if (std.time.Instant.now()) |now| {
+            log.info("threadEnter: subprocess started elapsed={}us", .{now.since(te_start) / 1000});
+        } else |_| {}
+    }
 
     // Track our process start time for abnormal exits
     const process_start = try std.time.Instant.now();
@@ -613,6 +626,9 @@ const Subprocess = struct {
     /// Initialize the subprocess. This will NOT start it, this only sets
     /// up the internal state necessary to start it later.
     pub fn init(gpa: Allocator, cfg: Config) !Subprocess {
+        const subprocess_init_start = std.time.Instant.now() catch null;
+        log.info("subprocess init: starting", .{});
+
         // We have a lot of maybe-allocations that all share the same lifetime
         // so use an arena so we don't end up in an accounting nightmare.
         var arena = std.heap.ArenaAllocator.init(gpa);
@@ -747,6 +763,12 @@ const Subprocess = struct {
         // This is not apprt-specific, so we do it here.
         env.remove("VTE_VERSION");
 
+        if (subprocess_init_start) |si_start| {
+            if (std.time.Instant.now()) |now| {
+                log.info("subprocess init: env setup done elapsed={}us", .{now.since(si_start) / 1000});
+            } else |_| {}
+        }
+
         // Setup our shell integration, if we can.
         const shell_command: configpkg.Command = shell: {
             const default_shell_command: configpkg.Command =
@@ -804,6 +826,12 @@ const Subprocess = struct {
             break :shell integration.command;
         };
 
+        if (subprocess_init_start) |si_start| {
+            if (std.time.Instant.now()) |now| {
+                log.info("subprocess init: shell integration done elapsed={}us", .{now.since(si_start) / 1000});
+            } else |_| {}
+        }
+
         // Add the environment variables that override any others.
         {
             var it = cfg.env_override.iterator();
@@ -855,6 +883,12 @@ const Subprocess = struct {
         // https://github.com/ghostty-org/ghostty/discussions/7769
         if (cwd) |pwd| try env.put("PWD", pwd);
 
+        if (subprocess_init_start) |si_start| {
+            if (std.time.Instant.now()) |now| {
+                log.info("subprocess init: complete elapsed={}us", .{now.since(si_start) / 1000});
+            } else |_| {}
+        }
+
         return .{
             .arena = arena,
             .env = env,
@@ -885,6 +919,8 @@ const Subprocess = struct {
         read: Pty.Fd,
         write: Pty.Fd,
     } {
+        const subprocess_start_time = std.time.Instant.now() catch null;
+        log.info("subprocess start: beginning", .{});
         assert(self.pty == null and self.process == null);
 
         // This function is funny because on POSIX systems it can
@@ -926,6 +962,12 @@ const Subprocess = struct {
                 self.env = null;
             }
         };
+
+        if (subprocess_start_time) |ss_start| {
+            if (std.time.Instant.now()) |now| {
+                log.info("subprocess start: pty opened elapsed={}us", .{now.since(ss_start) / 1000});
+            } else |_| {}
+        }
 
         log.debug("starting command command={f}", .{ArgsFormatter{ .args = self.args }});
 
@@ -1001,6 +1043,96 @@ const Subprocess = struct {
             };
         }
 
+        // Try the pre-fork pool for fast tab creation (Linux only, non-Flatpak).
+        if (comptime builtin.os.tag != .windows) pool: {
+            if (internal_os.isFlatpak()) break :pool;
+
+            const pool = subprocess_pool.getGlobal();
+            var entry = pool.acquire() orelse break :pool;
+
+            // Resize the PTY to match the actual terminal size.
+            entry.pty.setSize(.{
+                .ws_row = std.math.cast(u16, self.grid_size.rows) orelse std.math.maxInt(u16),
+                .ws_col = std.math.cast(u16, self.grid_size.columns) orelse std.math.maxInt(u16),
+                .ws_xpixel = std.math.cast(u16, self.screen_size.width) orelse std.math.maxInt(u16),
+                .ws_ypixel = std.math.cast(u16, self.screen_size.height) orelse std.math.maxInt(u16),
+            }) catch |err| {
+                log.warn("pool: failed to resize pty, falling back: {}", .{err});
+                subprocess_pool.discard(&entry);
+                break :pool;
+            };
+
+            // Send the command (env, args, cwd) to the pre-forked child.
+            subprocess_pool.sendCommand(
+                &entry,
+                self.args,
+                if (self.env) |*env| env else null,
+                cwd,
+            ) catch |err| {
+                log.warn("pool: failed to send command, falling back: {}", .{err});
+                subprocess_pool.discard(&entry);
+                break :pool;
+            };
+
+            // Close the pipe write end - child has the message.
+            posix.close(entry.pipe_w);
+
+            if (subprocess_start_time) |ss_start| {
+                if (std.time.Instant.now()) |now| {
+                    log.info("subprocess start: pool fast-path done elapsed={}us", .{now.since(ss_start) / 1000});
+                } else |_| {}
+            }
+            log.info("started subcommand via pool path={s} pid={}", .{ self.args[0], entry.pid });
+
+            // Use the pool entry's PTY instead of the one we opened above.
+            // Close both sides and replace with the pool entry's PTY.
+            // We close slave here; deinit() closes master but also sets
+            // self.* = undefined, so we must close slave first.
+            posix.close(pty.slave);
+            pty.deinit();
+            self.pty = entry.pty;
+            // Mark process as set so the defer knows we started, but
+            // we already closed pty.slave above, so prevent the defer
+            // from closing it again by setting in_child.
+            in_child = true;
+
+            // Create a Command struct for process tracking (pid, wait, etc).
+            self.process = .{ .fork_exec = .{
+                .path = self.args[0],
+                .args = self.args,
+                .env = if (self.env) |*env| env else null,
+                .cwd = cwd,
+                .os_pre_exec = null,
+                .rt_pre_exec = null,
+                .rt_pre_exec_info = self.rt_pre_exec_info,
+                .rt_post_fork = null,
+                .rt_post_fork_info = self.rt_post_fork_info,
+                .pid = entry.pid,
+            } };
+
+            // Fire-and-forget cgroup for the pool child.
+            if (comptime @hasDecl(apprt.runtime, "post_fork")) {
+                const post_cmd = &self.process.?.fork_exec;
+                apprt.runtime.post_fork.postFork(post_cmd) catch |err| {
+                    log.warn("pool: post-fork cgroup failed: {}", .{err});
+                };
+            }
+
+            // Clean up env (mirroring the normal path's defer).
+            if (self.env) |*env| {
+                env.deinit();
+                self.env = null;
+            }
+
+            // Replenish the pool in the background.
+            pool.warm();
+
+            return .{
+                .read = entry.pty.master,
+                .write = entry.pty.master,
+            };
+        }
+
         // Build our subcommand
         var cmd: Command = .{
             .path = self.args[0],
@@ -1052,9 +1184,20 @@ const Subprocess = struct {
         errdefer killCommand(&cmd) catch |err| {
             log.warn("error killing command during cleanup err={}", .{err});
         };
+        if (subprocess_start_time) |ss_start| {
+            if (std.time.Instant.now()) |now| {
+                log.info("subprocess start: fork+exec done elapsed={}us", .{now.since(ss_start) / 1000});
+            } else |_| {}
+        }
         log.info("started subcommand path={s} pid={?}", .{ self.args[0], cmd.pid });
 
         self.process = .{ .fork_exec = cmd };
+
+        // Warm the pool for future tabs (first tab always takes the slow path).
+        if (comptime builtin.os.tag != .windows) {
+            subprocess_pool.getGlobal().warm();
+        }
+
         return switch (builtin.os.tag) {
             .windows => .{
                 .read = pty.out_pipe,
