@@ -73,6 +73,15 @@ pub const StreamHandler = struct {
     /// The tmux control mode viewer state.
     tmux_viewer: if (tmux_enabled) ?*terminal.tmux.Viewer else void = if (tmux_enabled) null else {},
 
+    /// Timestamp when the surface was created, for time-to-first-prompt metric.
+    created_at: ?std.time.Instant = null,
+
+    /// Timestamp when the subprocess was started (after fork/exec).
+    subprocess_started_at: ?std.time.Instant = null,
+
+    /// Whether we've already logged the first prompt metric.
+    first_prompt_logged: bool = false,
+
     /// This is set to true when a message was written to the termio
     /// mailbox. This can be used by callers to determine if they need
     /// to wake up the termio thread.
@@ -1097,13 +1106,31 @@ pub const StreamHandler = struct {
                 self.surfaceMessageWriter(.{ .stop_command = code });
             },
 
+            .prompt_start, .fresh_line_new_prompt => {
+                if (!self.first_prompt_logged) {
+                    self.first_prompt_logged = true;
+                    if (std.time.Instant.now()) |now| {
+                        const total_ms = if (self.created_at) |created|
+                            now.since(created) / 1_000_000
+                        else
+                            0;
+                        const shell_ms = if (self.subprocess_started_at) |started|
+                            now.since(started) / 1_000_000
+                        else
+                            0;
+                        const ghostty_ms = total_ms -| shell_ms;
+                        log.info("time-to-first-prompt: total={}ms ghostty={}ms shell={}ms", .{
+                            total_ms, ghostty_ms, shell_ms,
+                        });
+                    } else |_| {}
+                }
+            },
+
             // Handled by Terminal, no special handling by us
             .end_prompt_start_input,
             .end_prompt_start_input_terminate_eol,
             .fresh_line,
-            .fresh_line_new_prompt,
             .new_command,
-            .prompt_start,
             => {},
         }
 

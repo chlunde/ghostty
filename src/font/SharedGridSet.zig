@@ -97,6 +97,8 @@ pub fn ref(
     config: *const DerivedConfig,
     font_size: DesiredSize,
 ) !struct { Key, *SharedGrid } {
+    const grid_ref_start = std.time.Instant.now() catch null;
+
     var key = try Key.init(self.alloc, config, font_size);
     errdefer key.deinit();
 
@@ -105,6 +107,11 @@ pub fn ref(
 
     const gop = try self.map.getOrPut(self.alloc, key);
     if (gop.found_existing) {
+        if (grid_ref_start) |gr_start| {
+            if (std.time.Instant.now()) |gr_now| {
+                log.info("font grid ref: cache hit elapsed={}us", .{gr_now.since(gr_start) / 1000});
+            } else |_| {}
+        }
         log.debug("found cached grid for font config", .{});
 
         // We can deinit the key because we found a cached value.
@@ -130,6 +137,7 @@ pub fn ref(
         // Build our collection. This is the expensive operation that
         // involves finding fonts, loading them (maybe, some are deferred),
         // etc.
+        const coll_start = std.time.Instant.now() catch null;
         var c = try self.collection(&key, font_size, config);
         errdefer c.deinit(self.alloc);
 
@@ -138,6 +146,12 @@ pub fn ref(
         styles.set(.bold, config.@"font-style-bold" != .false);
         styles.set(.italic, config.@"font-style-italic" != .false);
         styles.set(.bold_italic, config.@"font-style-bold-italic" != .false);
+
+        if (coll_start) |cs| {
+            if (std.time.Instant.now()) |cs_now| {
+                log.info("font grid ref: collection built elapsed={}us", .{cs_now.since(cs) / 1000});
+            } else |_| {}
+        }
 
         // Init our resolver which just requires setting fields.
         break :resolver .{
@@ -148,6 +162,12 @@ pub fn ref(
         };
     });
     errdefer grid.deinit(self.alloc);
+
+    if (grid_ref_start) |gr_start| {
+        if (std.time.Instant.now()) |gr_now| {
+            log.info("font grid ref: cache miss, full init elapsed={}us", .{gr_now.since(gr_start) / 1000});
+        } else |_| {}
+    }
 
     return .{ gop.key_ptr.*, gop.value_ptr.grid };
 }

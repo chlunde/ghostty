@@ -234,6 +234,8 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
 }
 
 fn threadMain_(self: *Thread, io: *termio.Termio) !void {
+    const thread_start = std.time.Instant.now() catch null;
+    log.info("IO thread: started", .{});
     defer log.debug("IO thread exited", .{});
 
     // Right now, on Darwin, `std.Thread.setName` can only name the current
@@ -267,6 +269,12 @@ fn threadMain_(self: *Thread, io: *termio.Termio) !void {
     try io.threadEnter(self, &cb.data);
     defer cb.data.deinit();
     defer io.threadExit(&cb.data);
+
+    if (thread_start) |start| {
+        if (std.time.Instant.now()) |now| {
+            log.info("IO thread: threadEnter complete elapsed={}us", .{now.since(start) / 1000});
+        } else |_| {}
+    }
 
     // Start the async handlers.
     mailbox.wakeup.wait(&self.loop, &self.wakeup_c, CallbackData, &cb, wakeupCallback);

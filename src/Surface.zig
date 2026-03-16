@@ -464,6 +464,9 @@ pub fn init(
     rt_app: *apprt.runtime.App,
     rt_surface: *apprt.runtime.Surface,
 ) !void {
+    const surface_init_start = std.time.Instant.now() catch null;
+    log.info("surface init: starting", .{});
+
     // Apply our conditional state. If we fail to apply the conditional state
     // then we log and attempt to move forward with the old config.
     var config_: ?configpkg.Config = config_original.changeConditionalState(
@@ -510,12 +513,24 @@ pub fn init(
         .ydpi = @intFromFloat(y_dpi),
     };
 
+    if (surface_init_start) |start| {
+        if (std.time.Instant.now()) |now| {
+            log.info("surface init: config+dpi done elapsed={}us", .{now.since(start) / 1000});
+        } else |_| {}
+    }
+
     // Setup our font group. This will reuse an existing font group if
     // it was already loaded.
     const font_grid_key, const font_grid = try app.font_grid_set.ref(
         &derived_config.font,
         font_size,
     );
+
+    if (surface_init_start) |start| {
+        if (std.time.Instant.now()) |now| {
+            log.info("surface init: font grid ref done elapsed={}us", .{now.since(start) / 1000});
+        } else |_| {}
+    }
 
     // Build our size struct which has all the sizes we need.
     const size: rendererpkg.Size = size: {
@@ -561,6 +576,12 @@ pub fn init(
     const mutex = try alloc.create(std.Thread.Mutex);
     mutex.* = .{};
     errdefer alloc.destroy(mutex);
+
+    if (surface_init_start) |start| {
+        if (std.time.Instant.now()) |now| {
+            log.info("surface init: renderer init done elapsed={}us", .{now.since(start) / 1000});
+        } else |_| {}
+    }
 
     // Create the renderer thread
     var render_thread = try rendererpkg.Thread.init(
@@ -631,6 +652,12 @@ pub fn init(
         // don't leak GHOSTTY_LOG to any subprocesses
         env.remove("GHOSTTY_LOG");
 
+        if (surface_init_start) |start| {
+            if (std.time.Instant.now()) |now| {
+                log.info("surface init: before exec init elapsed={}us", .{now.since(start) / 1000});
+            } else |_| {}
+        }
+
         // Initialize our IO backend
         var io_exec = try termio.Exec.init(alloc, .{
             .command = command,
@@ -646,6 +673,12 @@ pub fn init(
             .rt_post_fork_info = .init(config),
         });
         errdefer io_exec.deinit();
+
+        if (surface_init_start) |start| {
+            if (std.time.Instant.now()) |now| {
+                log.info("surface init: exec init done elapsed={}us", .{now.since(start) / 1000});
+            } else |_| {}
+        }
 
         // Initialize our IO mailbox
         var io_mailbox = try termio.Mailbox.initSPSC(alloc);
@@ -697,6 +730,12 @@ pub fn init(
     // setup on the main thread prior to spinning up the rendering thread.
     try renderer_impl.finalizeSurfaceInit(rt_surface);
 
+    if (surface_init_start) |start| {
+        if (std.time.Instant.now()) |now| {
+            log.info("surface init: termio init done, spawning threads elapsed={}us", .{now.since(start) / 1000});
+        } else |_| {}
+    }
+
     // Start our renderer thread
     self.renderer_thr = try std.Thread.spawn(
         .{},
@@ -712,6 +751,12 @@ pub fn init(
         .{ &self.io_thread, &self.io },
     );
     self.io_thr.setName("io") catch {};
+
+    if (surface_init_start) |start| {
+        if (std.time.Instant.now()) |now| {
+            log.info("surface init: threads spawned elapsed={}us", .{now.since(start) / 1000});
+        } else |_| {}
+    }
 
     // Determine our initial window size if configured. We need to do this
     // quite late in the process because our height/width are in grid dimensions,

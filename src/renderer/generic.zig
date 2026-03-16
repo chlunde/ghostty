@@ -656,11 +656,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         };
 
         pub fn init(alloc: Allocator, options: renderer.Options) !Self {
+            const renderer_init_start = std.time.Instant.now() catch null;
+            log.info("renderer init: starting", .{});
+
             // Initialize our graphics API wrapper, this will prepare the
             // surface provided by the apprt and set up any API-specific
             // GPU resources.
             var api = try GraphicsAPI.init(alloc, options);
             errdefer api.deinit();
+
+            if (renderer_init_start) |ri_start| {
+                if (std.time.Instant.now()) |ri_now| {
+                    log.info("renderer init: GraphicsAPI.init done elapsed={}us", .{ri_now.since(ri_start) / 1000});
+                } else |_| {}
+            }
 
             const has_custom_shaders = options.config.custom_shaders.value.items.len > 0;
 
@@ -670,6 +679,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 has_custom_shaders,
             );
             errdefer swap_chain.deinit();
+
+            if (renderer_init_start) |ri_start| {
+                if (std.time.Instant.now()) |ri_now| {
+                    log.info("renderer init: SwapChain.init done elapsed={}us", .{ri_now.since(ri_start) / 1000});
+                } else |_| {}
+            }
 
             // Create the font shaper.
             var font_shaper = try font.Shaper.init(alloc, .{
@@ -786,13 +801,31 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .display_link = display_link,
             };
 
+            if (renderer_init_start) |ri_start| {
+                if (std.time.Instant.now()) |ri_now| {
+                    log.info("renderer init: struct built, calling initShaders elapsed={}us", .{ri_now.since(ri_start) / 1000});
+                } else |_| {}
+            }
+
             try result.initShaders();
+
+            if (renderer_init_start) |ri_start| {
+                if (std.time.Instant.now()) |ri_now| {
+                    log.info("renderer init: initShaders done elapsed={}us", .{ri_now.since(ri_start) / 1000});
+                } else |_| {}
+            }
 
             // Ensure our undefined values above are correctly initialized.
             result.updateFontGridUniforms();
             result.updateScreenSizeUniforms();
             result.updateBgImageBuffer();
             try result.prepBackgroundImage();
+
+            if (renderer_init_start) |ri_start| {
+                if (std.time.Instant.now()) |ri_now| {
+                    log.info("renderer init: complete elapsed={}us", .{ri_now.since(ri_start) / 1000});
+                } else |_| {}
+            }
 
             return result;
         }

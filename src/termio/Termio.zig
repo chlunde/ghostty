@@ -296,6 +296,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .enquiry_response = opts.config.enquiry_response,
         .default_cursor_style = opts.config.cursor_style,
         .default_cursor_blink = opts.config.cursor_blink,
+        .created_at = std.time.Instant.now() catch null,
     };
 
     const thread_enter_state = try ThreadEnterState.create(
