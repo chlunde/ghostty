@@ -131,11 +131,18 @@ fn glDebugMessageCallback(
 
 /// Prepares the provided GL context, loading it with glad.
 fn prepareContext(getProcAddress: anytype) !void {
+    const gl_start = std.time.Instant.now() catch null;
     const version = try gl.glad.load(getProcAddress);
     const major = gl.glad.versionMajor(@intCast(version));
     const minor = gl.glad.versionMinor(@intCast(version));
     errdefer gl.glad.unload();
-    log.info("loaded OpenGL {}.{}", .{ major, minor });
+    if (gl_start) |start| {
+        if (std.time.Instant.now()) |now| {
+            log.info("loaded OpenGL {}.{} elapsed={}us", .{ major, minor, now.since(start) / 1000 });
+        } else |_| {}
+    } else {
+        log.info("loaded OpenGL {}.{}", .{ major, minor });
+    }
 
     // Need to check version before trying to enable it
     if (major < MIN_VERSION_MAJOR or

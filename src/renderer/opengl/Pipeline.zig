@@ -38,12 +38,20 @@ stride: usize,
 blending_enabled: bool,
 
 pub fn init(comptime VertexAttributes: ?type, opts: Options) !Self {
-    // Load and compile our shaders.
-    const program = try gl.Program.createVF(
-        opts.vertex_fn,
-        opts.fragment_fn,
-    );
-    errdefer program.destroy();
+    return initWithProgram(VertexAttributes, opts, null);
+}
+
+/// Initialize a pipeline, optionally reusing a pre-compiled program.
+/// When a cached program is provided, shader compilation is skipped.
+pub fn initWithProgram(comptime VertexAttributes: ?type, opts: Options, cached_program: ?gl.Program) !Self {
+    const program = cached_program orelse program: {
+        const p = try gl.Program.createVF(
+            opts.vertex_fn,
+            opts.fragment_fn,
+        );
+        break :program p;
+    };
+    errdefer if (cached_program == null) program.destroy();
 
     const pbind = try program.use();
     defer pbind.unbind();
@@ -69,8 +77,16 @@ pub fn init(comptime VertexAttributes: ?type, opts: Options) !Self {
     };
 }
 
+/// Deinit pipeline, optionally keeping the program alive (for caching).
 pub fn deinit(self: *const Self) void {
     self.program.destroy();
+}
+
+/// Deinit pipeline without destroying the program (caller manages program lifetime).
+pub fn deinitKeepProgram(self: *const Self) void {
+    _ = self;
+    // FBO and VAO are not currently destroyed in deinit either,
+    // so nothing to do here. This is for symmetry with deinit.
 }
 
 fn autoAttribute(
