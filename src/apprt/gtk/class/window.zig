@@ -256,6 +256,12 @@ pub const Window = extern struct {
         /// setup by `setup-menu`.
         context_menu_page: ?*adw.TabPage = null,
 
+        /// Pending tab insert+select. Deferred via idle callback to avoid
+        /// showing the uninitialized GL framebuffer (black flash).
+        pending_tab: ?*gtk.Widget = null,
+        pending_tab_position: c_int = 0,
+        pending_tab_source: ?c_uint = null,
+
         // Template bindings
         tab_overview: *adw.TabOverview,
         tab_bar: *adw.TabBar,
@@ -388,7 +394,7 @@ pub const Window = extern struct {
     /// at the position dictated by the `window-new-tab-position` config.
     /// The new tab will be selected.
     pub fn newTab(self: *Self, parent_: ?*CoreSurface) void {
-        _ = self.newTabPage(parent_, .tab, .none);
+        self.newTabPage(parent_, .tab, .none);
     }
 
     pub fn newTabForWindow(
@@ -402,7 +408,7 @@ pub const Window = extern struct {
             pub const none: @This() = .{};
         },
     ) void {
-        _ = self.newTabPage(
+        self.newTabPage(
             parent_,
             .window,
             .{
@@ -424,7 +430,7 @@ pub const Window = extern struct {
 
             pub const none: @This() = .{};
         },
-    ) *adw.TabPage {
+    ) void {
         const priv: *Private = self.private();
         const tab_view = priv.tab_view;
 
@@ -450,7 +456,8 @@ pub const Window = extern struct {
         const config = if (priv.config) |v| v.get() else {
             // If we don't have a config we just append it at the end.
             // This should never happen.
-            return tab_view.append(tab.as(gtk.Widget));
+            _ = tab_view.append(tab.as(gtk.Widget));
+            return;
         };
         const position = switch (config.@"window-new-tab-position") {
             .current => current: {
@@ -463,44 +470,13 @@ pub const Window = extern struct {
             .end => tab_view.getNPages(),
         };
 
-        // Add the page and select it
-        const page = tab_view.insert(tab.as(gtk.Widget), position);
-        tab_view.setSelectedPage(page);
-
-        // Create some property bindings
-        _ = tab.as(gobject.Object).bindProperty(
-            "title",
-            page.as(gobject.Object),
-            "title",
-            .{ .sync_create = true },
-        );
-        _ = tab.as(gobject.Object).bindProperty(
-            "tooltip",
-            page.as(gobject.Object),
-            "tooltip",
-            .{ .sync_create = true },
-        );
-
-        // Bind signals
-        const split_tree = tab.getSplitTree();
-        _ = SplitTree.signals.changed.connect(
-            split_tree,
-            *Self,
-            tabSplitTreeChanged,
-            self,
-            .{},
-        );
-
-        // Run an initial notification for the surface tree so we can setup
-        // initial state.
-        tabSplitTreeChanged(
-            split_tree,
-            null,
-            split_tree.getTree(),
-            self,
-        );
-
-        return page;
+        // Defer insert+select via an idle callback to avoid showing the
+        // uninitialized GL framebuffer (black flash). Both operations happen
+        // in the same frame tick so the tab bar updates once with the new
+        // tab already selected.
+        priv.pending_tab = tab.as(gtk.Widget);
+        priv.pending_tab_position = position;
+        priv.pending_tab_source = glib.idleAdd(deferredTabInsert, self);
     }
 
     pub const SelectTab = union(enum) {
@@ -1229,6 +1205,12 @@ pub const Window = extern struct {
 
         priv.command_palette.set(null);
 
+        if (priv.pending_tab_source) |v| {
+            _ = glib.Source.remove(v);
+            priv.pending_tab_source = null;
+            priv.pending_tab = null;
+        }
+
         if (priv.config) |v| {
             v.unref();
             priv.config = null;
@@ -1308,7 +1290,42 @@ pub const Window = extern struct {
         _: *adw.TabOverview,
         self: *Self,
     ) callconv(.c) *adw.TabPage {
-        return self.newTabPage(if (self.getActiveSurface()) |v| v.core() else null, .tab, .none);
+        // Tab overview create-tab signal requires returning a page directly,
+        // so we insert+select synchronously here (no deferred path).
+        const priv = self.private();
+        const tab = Tab.new(priv.config, .{});
+        if (self.getActiveSurface()) |v| {
+            if (v.core()) |core| tab.setParentWithContext(core, .tab);
+        }
+        const page = priv.tab_view.append(tab.as(gtk.Widget));
+        priv.tab_view.setSelectedPage(page);
+
+        // Setup property bindings for the new page
+        _ = tab.as(gobject.Object).bindProperty(
+            "title",
+            page.as(gobject.Object),
+            "title",
+            .{ .sync_create = true },
+        );
+        _ = tab.as(gobject.Object).bindProperty(
+            "tooltip",
+            page.as(gobject.Object),
+            "tooltip",
+            .{ .sync_create = true },
+        );
+
+        // Bind signals
+        const split_tree = tab.getSplitTree();
+        _ = SplitTree.signals.changed.connect(
+            split_tree,
+            *Self,
+            tabSplitTreeChanged,
+            self,
+            .{},
+        );
+        tabSplitTreeChanged(split_tree, null, split_tree.getTree(), self);
+
+        return page;
     }
 
     fn tabOverviewOpen(
@@ -1694,6 +1711,47 @@ pub const Window = extern struct {
         }
 
         // We react to the changes in the propFullscreen callback
+    }
+
+    fn deferredTabInsert(ud: ?*anyopaque) callconv(.c) c_int {
+        const self: *Self = @ptrCast(@alignCast(ud orelse return 0));
+        const priv = self.private();
+        const tab_widget = priv.pending_tab orelse return 0;
+        priv.pending_tab = null;
+        priv.pending_tab_source = null;
+
+        const tab_view = priv.tab_view;
+        const page = tab_view.insert(tab_widget, priv.pending_tab_position);
+        tab_view.setSelectedPage(page);
+
+        // Setup property bindings for the new page
+        assert(gobject.ext.isA(tab_widget, Tab));
+        const tab = gobject.ext.cast(Tab, tab_widget) orelse return 0;
+        _ = tab.as(gobject.Object).bindProperty(
+            "title",
+            page.as(gobject.Object),
+            "title",
+            .{ .sync_create = true },
+        );
+        _ = tab.as(gobject.Object).bindProperty(
+            "tooltip",
+            page.as(gobject.Object),
+            "tooltip",
+            .{ .sync_create = true },
+        );
+
+        // Bind signals
+        const split_tree = tab.getSplitTree();
+        _ = SplitTree.signals.changed.connect(
+            split_tree,
+            *Self,
+            tabSplitTreeChanged,
+            self,
+            .{},
+        );
+        tabSplitTreeChanged(split_tree, null, split_tree.getTree(), self);
+
+        return 0; // don't repeat
     }
 
     fn surfaceToggleMaximize(
