@@ -12,6 +12,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const gl = @import("opengl");
 const egl = gl.egl;
+const OpenGL = @import("../OpenGL.zig");
 
 const log = std.log.scoped(.opengl);
 
@@ -33,6 +34,10 @@ display: *egl.Display,
 /// The EGL config used to create surface renderer contexts. Chosen
 /// once here so that all contexts share compatible capabilities.
 config: *egl.Config,
+
+/// Root context that all surface contexts share objects with.
+/// It is never made current.
+share_context: *egl.Context,
 
 pub fn init(alloc: Allocator, options: Options) !*Device {
     const self = try alloc.create(Device);
@@ -66,9 +71,16 @@ pub fn init(alloc: Allocator, options: Options) !*Device {
         return err;
     };
 
+    try egl.bindApi(egl.c.EGL_OPENGL_API);
+    const share_context = egl.Context.create(display, config, null, OpenGL.context_attrs) catch |err| {
+        log.warn("failed to create shared EGL context err={}", .{err});
+        return err;
+    };
+
     self.* = .{
         .display = display,
         .config = config,
+        .share_context = share_context,
     };
     return self;
 }
@@ -100,6 +112,7 @@ fn logUnsupportedPlatform() void {
 }
 
 pub fn deinit(self: *Device, alloc: std.mem.Allocator) void {
+    self.share_context.destroy(self.display) catch {};
     // Do not destroy the EGL display as it is externally managed.
     alloc.destroy(self);
 }

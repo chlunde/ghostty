@@ -3,9 +3,67 @@ const Allocator = std.mem.Allocator;
 const assert = @import("../../quirks.zig").inlineAssert;
 const math = @import("../../math.zig");
 
+const gl = @import("opengl");
+const global = @import("../../global.zig");
 const Pipeline = @import("Pipeline.zig");
 
 const log = std.log.scoped(.opengl);
+
+/// Global cache of compiled GL programs for the built-in pipelines.
+/// All surface contexts share objects with the device's root context,
+/// so compiled programs can be shared across surfaces, avoiding shader
+/// recompilation (~8ms) on every new tab.
+const ProgramCache = struct {
+    programs: [pipeline_descs.len]gl.Program = undefined,
+    ref_count: u32 = 0,
+    initialized: bool = false,
+    mutex: std.Io.Mutex = .init,
+
+    fn ref(self: *ProgramCache) ![pipeline_descs.len]gl.Program {
+        self.mutex.lockUncancelable(global.io());
+        defer self.mutex.unlock(global.io());
+        if (self.initialized) {
+            self.ref_count += 1;
+            log.debug("shader program cache: hit ref_count={}", .{self.ref_count});
+            return self.programs;
+        }
+
+        log.debug("shader program cache: miss, compiling programs", .{});
+
+        var compiled: usize = 0;
+        errdefer for (self.programs[0..compiled]) |p| p.destroy();
+
+        inline for (pipeline_descs, 0..) |pipeline, i| {
+            self.programs[i] = try gl.Program.createVF(
+                pipeline[1].vertex_fn,
+                pipeline[1].fragment_fn,
+            );
+            compiled += 1;
+        }
+
+        // Make the programs visible to the other contexts in the share group.
+        gl.finish();
+        self.initialized = true;
+        self.ref_count = 1;
+
+        return self.programs;
+    }
+
+    fn deref(self: *ProgramCache) void {
+        self.mutex.lockUncancelable(global.io());
+        defer self.mutex.unlock(global.io());
+        if (!self.initialized) return;
+        self.ref_count -= 1;
+        if (self.ref_count == 0) {
+            for (&self.programs) |*p| p.destroy();
+            self.initialized = false;
+            log.debug("shader program cache: all refs released, programs destroyed", .{});
+        }
+    }
+};
+
+/// Global program cache. Each surface has its own render thread.
+var program_cache: ProgramCache = .{};
 
 const pipeline_descs: []const struct { [:0]const u8, PipelineDescription } =
     &.{
@@ -59,6 +117,16 @@ const PipelineDescription = struct {
             .blending_enabled = self.blending_enabled,
         });
     }
+
+    /// Initialize a pipeline reusing an already-compiled GL program.
+    fn initPipelineWithProgram(self: PipelineDescription, program: gl.Program) !Pipeline {
+        return try Pipeline.initWithProgram(self.vertex_attributes, .{
+            .vertex_fn = self.vertex_fn,
+            .fragment_fn = self.fragment_fn,
+            .step_fn = self.step_fn,
+            .blending_enabled = self.blending_enabled,
+        }, program);
+    }
 };
 
 /// We create a type for the pipeline collection based on our desc array.
@@ -104,18 +172,25 @@ pub const Shaders = struct {
         alloc: Allocator,
         post_shaders: []const [:0]const u8,
     ) !Shaders {
+        // Get or compile the shared GL programs for built-in pipelines.
+        const cached_programs = try program_cache.ref();
+
         var pipelines: PipelineCollection = undefined;
 
         var initialized_pipelines: usize = 0;
 
-        errdefer inline for (pipeline_descs, 0..) |pipeline, i| {
-            if (i < initialized_pipelines) {
-                @field(pipelines, pipeline[0]).deinit();
+        errdefer {
+            inline for (pipeline_descs, 0..) |pipeline, i| {
+                if (i < initialized_pipelines) {
+                    @field(pipelines, pipeline[0]).deinitKeepProgram();
+                }
             }
-        };
+            program_cache.deref();
+        }
 
-        inline for (pipeline_descs) |pipeline| {
-            @field(pipelines, pipeline[0]) = try pipeline[1].initPipeline();
+        // Create per-surface FBO/VAO for each pipeline, reusing cached programs.
+        inline for (pipeline_descs, 0..) |pipeline, i| {
+            @field(pipelines, pipeline[0]) = try pipeline[1].initPipelineWithProgram(cached_programs[i]);
             initialized_pipelines += 1;
         }
 
@@ -144,12 +219,15 @@ pub const Shaders = struct {
         if (self.defunct) return;
         self.defunct = true;
 
-        // Release our primary shaders
+        // Release per-surface resources (FBO/VAO) but keep programs cached.
         inline for (pipeline_descs) |pipeline| {
-            @field(self.pipelines, pipeline[0]).deinit();
+            @field(self.pipelines, pipeline[0]).deinitKeepProgram();
         }
 
-        // Release our postprocess shaders
+        // Release our reference to the shared program cache.
+        program_cache.deref();
+
+        // Release our postprocess shaders (these are not cached).
         if (self.post_pipelines.len > 0) {
             for (self.post_pipelines) |pipeline| {
                 pipeline.deinit();

@@ -39,6 +39,12 @@ const log = std.log.scoped(.opengl);
 pub const MIN_VERSION_MAJOR = 4;
 pub const MIN_VERSION_MINOR = 3;
 
+pub const context_attrs: [:egl.c.EGL_NONE]const egl.c.EGLint = &.{
+    egl.c.EGL_CONTEXT_MAJOR_VERSION,       MIN_VERSION_MAJOR,
+    egl.c.EGL_CONTEXT_MINOR_VERSION,       MIN_VERSION_MINOR,
+    egl.c.EGL_CONTEXT_OPENGL_PROFILE_MASK, egl.c.EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+};
+
 alloc: std.mem.Allocator,
 
 /// Alpha blending mode
@@ -61,12 +67,10 @@ pub fn init(
     try egl.bindApi(egl.c.EGL_OPENGL_API);
 
     // Create our context. Contexts are surface-scoped because a
-    // context can only be current on one thread at a time.
-    const context = egl.Context.create(display, device.config, null, &.{
-        egl.c.EGL_CONTEXT_MAJOR_VERSION,       MIN_VERSION_MAJOR,
-        egl.c.EGL_CONTEXT_MINOR_VERSION,       MIN_VERSION_MINOR,
-        egl.c.EGL_CONTEXT_OPENGL_PROFILE_MASK, egl.c.EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-    }) catch |err| {
+    // context can only be current on one thread at a time. They share
+    // objects with the device's root context so that compiled shader
+    // programs can be reused across surfaces.
+    const context = egl.Context.create(display, device.config, @ptrCast(device.share_context), context_attrs) catch |err| {
         log.warn("failed to create EGL context err={}", .{err});
         return err;
     };
