@@ -155,6 +155,7 @@ pub const RenderSurface = extern struct {
         // currently displaying.
         if (priv.core_surface) |core| {
             if (core.renderer.takeFrame()) |frame| {
+                core.startup.markOnce("first_frame");
                 self.rebuildTexture(frame) catch |err| switch (err) {
                     // GTK can't import our DMABUFs, e.g. due to an
                     // incompatible format modifier on multi-GPU setups.

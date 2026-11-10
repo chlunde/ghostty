@@ -40,6 +40,7 @@ const SurfaceScrolledWindow = @import("surface_scrolled_window.zig").SurfaceScro
 const RenderSurface = @import("render_surface.zig").RenderSurface;
 const i18n = @import("../../../os/i18n.zig");
 const global = @import("../../../global.zig");
+const StartupTrace = @import("../../../StartupTrace.zig");
 const gtk_version = @import("../gtk_version.zig");
 const Overrides = @import("Overrides.zig");
 const scale_util = @import("../scale.zig");
@@ -664,6 +665,9 @@ pub const Surface = extern struct {
         /// size GTK will allocate for this widget beforehand. This will
         /// then be realized when the widget itself is realized.
         core_surface: ?*CoreSurface = null,
+
+        /// When this widget was created, for startup latency tracing.
+        created_at: std.Io.Timestamp = undefined,
 
         /// Cached metrics for libghostty callbacks
         size: apprt.SurfaceSize,
@@ -1816,6 +1820,7 @@ pub const Surface = extern struct {
         const priv = self.private();
 
         // Initialize some private fields so they aren't undefined
+        priv.created_at = .now(global.io(), .awake);
         priv.rt_surface = .{ .surface = self };
         priv.precision_scroll = false;
         priv.cursor_pos = .{ .x = 0, .y = 0 };
@@ -3557,6 +3562,7 @@ pub const Surface = extern struct {
     fn initSurface(self: *Self) InitError!void {
         const priv: *Private = self.private();
         assert(priv.core_surface == null);
+        (StartupTrace{ .start = priv.created_at }).mark("gtk_widget_to_core_init");
 
         const app = Application.default();
         const alloc = app.allocator();

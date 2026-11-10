@@ -906,6 +906,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             if (@hasDecl(GraphicsAPI, "threadEnter")) {
                 try self.api.threadEnter(surface);
             }
+            self.surface_mailbox.surface.startup.mark("render_thread_enter");
         }
 
         /// Callback called by renderer.Thread when it exits. Called on the
@@ -1818,6 +1819,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.reinitialize_shaders = false;
                 self.shaders.deinit(self.alloc);
                 try self.initShaders();
+                self.surface_mailbox.surface.startup.mark("shaders_compiled");
             }
 
             // Our shaders should not be defunct at this point.

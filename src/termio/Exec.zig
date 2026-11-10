@@ -102,6 +102,7 @@ pub fn threadEnter(
         std.process.exit(1);
     };
     errdefer self.subprocess.stop();
+    io.terminal_stream.handler.surface_mailbox.surface.startup.mark("subprocess_started");
 
     // Watcher to detect subprocess exit
     var process: ?xev.Process = if (self.subprocess.process) |v| switch (v) {

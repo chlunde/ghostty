@@ -21,6 +21,7 @@ const assert = @import("quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const global = @import("global.zig");
+const StartupTrace = @import("StartupTrace.zig");
 const oni = @import("oniguruma");
 const simd = @import("simd/main.zig");
 const crash = @import("crash/main.zig");
@@ -134,6 +135,9 @@ last_binding_trigger: u64 = 0,
 io: termio.Termio,
 io_thread: termio.Thread,
 io_thr: std.Thread,
+
+/// Startup latency milestones for this surface.
+startup: StartupTrace,
 
 /// Terminal inspector
 inspector: ?*inspectorpkg.Inspector = null,
@@ -482,6 +486,8 @@ pub fn init(
     rt_app: *apprt.runtime.App,
     rt_surface: *apprt.runtime.Surface,
 ) !void {
+    var startup: StartupTrace = .init();
+
     // Apply our conditional state. If we fail to apply the conditional state
     // then we log and attempt to move forward with the old config.
     var config_: ?configpkg.Config = config_original.changeConditionalState(
@@ -532,6 +538,7 @@ pub fn init(
         font_size,
     );
     errdefer app.font_grid_set.deref(font_grid_key);
+    startup.mark("font_grid");
 
     // Build our size struct which has all the sizes we need.
     const size: rendererpkg.Size = size: {
@@ -588,6 +595,7 @@ pub fn init(
         });
     };
     errdefer renderer_impl.deinit();
+    startup.mark("renderer_init");
 
     // The mutex used to protect our renderer state.
     const mutex = try alloc.create(std.Io.Mutex);
@@ -623,6 +631,7 @@ pub fn init(
         .alloc = alloc,
         .app = app,
         .rt_app = rt_app,
+        .startup = startup,
         .rt_surface = rt_surface,
         .font_grid_key = font_grid_key,
         .font_size = font_size,
@@ -765,6 +774,7 @@ pub fn init(
         .{ &self.io_thread, &self.io },
     );
     self.io_thr.setName(global.io(), "io") catch {};
+    self.startup.mark("threads_spawned");
 
     // Determine our initial window size if configured. We need to do this
     // quite late in the process because our height/width are in grid dimensions,
