@@ -34,8 +34,8 @@ pub const PostForkInfo = struct {
 /// If we are configured to do so, tell `systemd` to move the new child PID into
 /// a transient `systemd` scope with the configured resource limits.
 ///
-/// If we are configured to hard fail, log an error message and return an error
-/// code if we don't detect the move in time.
+/// Does not wait for the move to complete; systemd moves the child
+/// asynchronously after accepting the request.
 pub fn postFork(cmd: *Command) Command.PostForkError!void {
     switch (cmd.rt_post_fork_info.linux_cgroup) {
         .always => {},
@@ -85,36 +85,4 @@ pub fn postFork(cmd: *Command) Command.PostForkError!void {
         log.warn("unable to create transient systemd scope {s}: {t}", .{ expected_cgroup, err });
         return;
     };
-
-    const start: std.Io.Timestamp = .now(global.io(), .awake);
-
-    loop: while (true) {
-        if (start.untilNow(global.io(), .awake).toMilliseconds() > 250) {
-            if (cmd.rt_pre_exec_info.linux_cgroup_hard_fail) {
-                log.err("transition to new transient systemd scope {s} took too long", .{expected_cgroup});
-                return error.PostForkError;
-            }
-            log.warn("transition to transient systemd scope {s} took too long", .{expected_cgroup});
-            break :loop;
-        }
-
-        not_found: {
-            var current_cgroup_buf: [4096]u8 = undefined;
-
-            const current_cgroup_raw = internal_os.cgroup.current(
-                &current_cgroup_buf,
-                @intCast(pid),
-            ) orelse break :not_found;
-
-            const index = std.mem.lastIndexOfScalar(u8, current_cgroup_raw, '/') orelse break :not_found;
-            const current_cgroup = current_cgroup_raw[index + 1 ..];
-
-            if (std.mem.eql(u8, current_cgroup, expected_cgroup)) {
-                log.debug("transition to transient systemd scope {s} complete", .{expected_cgroup});
-                break :loop;
-            }
-        }
-
-        std.Io.sleep(global.io(), .fromMilliseconds(25), .awake) catch unreachable;
-    }
 }
